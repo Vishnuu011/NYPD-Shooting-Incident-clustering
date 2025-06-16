@@ -1,0 +1,10 @@
+pandas
+numpy
+matplotlib
+folium
+hdbscan
+scikit-learn
+plotly
+joblib
+flask
+streamlit
