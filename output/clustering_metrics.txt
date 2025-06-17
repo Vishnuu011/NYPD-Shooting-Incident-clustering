@@ -1,0 +1,7 @@
+
+CLUSTERING QUALITY METRICS:
+- Silhouette Score: 0.518 (range: -1 to 1, higher better)
+- Calinski-Harabasz Index: 66672.1 (higher better)
+- Davies-Bouldin Index: 0.648 (lower better)
+- Average Intra-Cluster Density: 0.001300 degrees
+- Average Minimum Cluster Distance: 0.004423 degrees

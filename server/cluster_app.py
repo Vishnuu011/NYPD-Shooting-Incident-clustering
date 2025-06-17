@@ -28,7 +28,10 @@ from streamlit_folium import folium_static
 import logging
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from base.base_i import LoadCsvDataForPreprocess
+from base.base_i import (
+    LoadCsvDataForPreprocess,
+    HDBSCAN
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -148,7 +151,233 @@ class LoadDataAndPreprocess(LoadCsvDataForPreprocess):
             raise 
 
 
-if __name__ == "__main__":
-    df=LoadDataAndPreprocess(
-        file_path=r"C:\Users\Vishnu\Desktop\NYPD_SHOOTING_CLUSTERING\NYPD-Shooting-Incident-clustering\data\NYPD_Shooting_Incident_Data__Historic_.csv"
-    ).load_and_preprocess()
+class HDBSCANCluster(HDBSCAN):
+
+    def __init__(
+            self,
+            min_cluster_size: int=15,
+            min_samples: int=5,
+            metric: str='haversine',
+            cluster_selection_method: str='eom',
+            prediction_data: bool=True
+        ):
+
+        try:
+            self.min_cluster_size=min_cluster_size
+            self.min_samples=min_samples
+            self.metric=metric
+            self.cluster_selection_method=cluster_selection_method
+            self.prediction_data=prediction_data
+        except Exception as e:
+            logger.error(f"Error Occured In : {e}")
+            print(f"Error Occured In : {e}")
+            raise 
+
+    def spatial_clustering(self, df: pd.DataFrame, 
+                           save_model=True) -> tuple[pd.DataFrame, HDBSCAN]:
+
+        try:
+            logger.info("performing spratial clustering .....")
+
+            spatial_data = df[['Latitude', 'Longitude']].copy()
+
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=self.min_cluster_size,
+                min_samples=self.min_samples,
+                metric=self.metric,
+                cluster_selection_method=self.cluster_selection_method,
+                prediction_data=self.prediction_data
+            )
+
+            coords_rad = np.radians(spatial_data)
+            df['SPATIAL_CLUSTER'] = clusterer.fit_predict(coords_rad)
+
+            cluster_counts = df['SPATIAL_CLUSTER'].value_counts()
+            df["CLUSTER_SIZE"] = df['SPATIAL_CLUSTER'].map(cluster_counts)
+            print(f"Identified {cluster_counts[cluster_counts.index != -1].shape[0]} spatial clusters")
+            if save_model:
+                joblib.dump(clusterer, 'hdbscan_clusterer.joblib')
+                logger.info("Saved clustering model to hdbscan_clusterer.joblib")
+            return df, clusterer    
+        except Exception as e:
+            logger.error(f"Error Occured In : {e}")
+            print(f"Error Occured In : {e}")
+            raise   
+
+    def evaluate_clusering(self, df: pd.DataFrame):
+
+        try:
+            logger.info("Evaluating clustering quality...")
+
+            # Prepare data - only clustered points (exclude noise)
+            clustered = df[df['SPATIAL_CLUSTER'] != -1]
+            if len(clustered) < 2:
+                print("Not enough clustered points for evaluation")
+                return None
+            coords = clustered[['Latitude', 'Longitude']].values
+            labels = clustered['SPATIAL_CLUSTER'].values
+            # Calculate evaluation metrics
+            metrics = {}
+            # Silhouette Score (-1 to 1, higher is better)
+            try:
+                metrics['silhouette'] = silhouette_score(coords, labels, metric='haversine')
+            except:
+                metrics['silhouette'] = -1  # Error value
+            # Calinski-Harabasz Index (higher is better)
+            try:
+                metrics['calinski_harabasz'] = calinski_harabasz_score(coords, labels)
+            except:
+                metrics['calinski_harabasz'] = -1
+
+            # Davies-Bouldin Index (lower is better)
+            try:
+                metrics['davies_bouldin'] = davies_bouldin_score(coords, labels)
+            except:
+                metrics['davies_bouldin'] = float('inf')
+
+            # Cluster separation index (custom metric)
+            cluster_centers = clustered.groupby('SPATIAL_CLUSTER')[['Latitude', 'Longitude']].mean()
+            min_distances = []
+            for center in cluster_centers.values:
+                distances = np.linalg.norm(cluster_centers.values - center, axis=1)
+                min_distances.append(np.min(distances[distances > 0]))
+            metrics['avg_min_cluster_distance'] = np.mean(min_distances)
+
+            # Intra-cluster density
+            intra_density = []
+            for cluster_id in clustered['SPATIAL_CLUSTER'].unique():
+                cluster_points = clustered[clustered['SPATIAL_CLUSTER'] == cluster_id][['Latitude', 'Longitude']].values
+                center = np.mean(cluster_points, axis=0)
+                distances = np.linalg.norm(cluster_points - center, axis=1)
+                intra_density.append(np.mean(distances))
+            metrics['avg_intra_cluster_density'] = np.mean(intra_density)
+
+            logger.info("Clustering evaluation complete")
+            return metrics
+        except Exception as e:
+            logger.error(f"Error Occured In : {e}")
+            print(f"Error Occured In : {e}")
+            raise  
+
+    def visualize_cluster_quality(self, df, metrics):
+
+        try:
+            print("Visualizing cluster quality...")
+
+            # Prepare data
+            clustered = df[df['SPATIAL_CLUSTER'] != -1]
+
+            # 1. Cluster size distribution
+            cluster_sizes = clustered['SPATIAL_CLUSTER'].value_counts()
+
+            # 2. T-SNE visualization
+            tsne = TSNE(
+                n_components=2, 
+                random_state=42, 
+                perplexity=min(30, len(clustered)-1)
+            )
+            tsne_results = tsne.fit_transform(clustered[['Latitude', 'Longitude']])
+
+            # Create figure
+            fig, ax = plt.subplots(2, 2, figsize=(18, 16))
+
+            # Cluster size distribution
+            sns.barplot(x=cluster_sizes.values, y=cluster_sizes.index.astype(str),
+                        ax=ax[0, 0], palette='viridis')
+            ax[0, 0].set_title('Cluster Size Distribution', fontsize=16)
+            ax[0, 0].set_xlabel('Number of Points', fontsize=14)
+            ax[0, 0].set_ylabel('Cluster ID', fontsize=14)
+
+            # T-SNE visualization
+            scatter = ax[0, 1].scatter(
+                tsne_results[:, 0], tsne_results[:, 1],
+                c=clustered['SPATIAL_CLUSTER'], cmap='tab20', alpha=0.6
+            )
+            ax[0, 1].set_title('t-SNE Cluster Visualization', fontsize=16)
+            ax[0, 1].set_xlabel('t-SNE 1', fontsize=14)
+            ax[0, 1].set_ylabel('t-SNE 2', fontsize=14)
+            plt.colorbar(scatter, ax=ax[0, 1], label='Cluster ID')
+
+            # Metric visualization
+            metric_names = ['silhouette', 'calinski_harabasz', 'davies_bouldin']
+            metric_values = [metrics.get(m, 0) for m in metric_names]
+            metric_labels = ['Silhouette (↑)', 'Calinski-Harabasz (↑)', 'Davies-Bouldin (↓)']
+
+            # Create radar chart for metrics
+            angles = np.linspace(0, 2 * np.pi, len(metric_names), endpoint=False)
+            values = np.array(metric_values)
+            values = np.concatenate((values, [values[0]]))
+            angles = np.concatenate((angles, [angles[0]]))
+
+            ax[1, 0] = plt.subplot(2, 2, 3, polar=True)
+            ax[1, 0].plot(angles, values, 'o-', linewidth=2)
+            ax[1, 0].fill(angles, values, alpha=0.25)
+            ax[1, 0].set_xticks(angles[:-1])
+            ax[1, 0].set_xticklabels(metric_labels)
+            ax[1, 0].set_title('Cluster Quality Metrics', fontsize=16, pad=20)
+
+            # Boxplot of intra-cluster distances
+            intra_distances = []
+            for cluster_id in clustered['SPATIAL_CLUSTER'].unique():
+                cluster_points = clustered[clustered['SPATIAL_CLUSTER'] == cluster_id][['Latitude', 'Longitude']].values
+                center = np.mean(cluster_points, axis=0)
+                distances = np.linalg.norm(cluster_points - center, axis=1)
+                intra_distances.append(distances)
+
+            ax[1, 1].boxplot(intra_distances, vert=False)
+            ax[1, 1].set_title('Intra-Cluster Distance Distribution', fontsize=16)
+            ax[1, 1].set_xlabel('Distance from Cluster Center (degrees)', fontsize=14)
+            ax[1, 1].set_ylabel('Cluster', fontsize=14)
+
+            plt.tight_layout()
+            return fig
+        except Exception as e:
+            logger.info(f"Error Occured In : {e}")
+            raise    
+
+    
+class Pipeline:
+    def __init__(self):
+        pass
+
+    def main(self):
+
+        try:
+            os.makedirs('output', exist_ok=True)
+            file_path = r'C:\Users\Vishnu\Desktop\NYPD_SHOOTING_CLUSTERING\NYPD-Shooting-Incident-clustering\data\NYPD_Shooting_Incident_Data__Historic_.csv'
+            if not os.path.exists(file_path):
+                print(f"Error: Data file not found at {file_path}")
+                return
+            df=LoadDataAndPreprocess(
+                file_path=file_path
+            ).load_and_preprocess()
+            df.to_csv("cleaned_and_cluster_label.csv", index=False)
+            HdbscanAlgoritham=HDBSCANCluster(
+                min_cluster_size=15,
+                min_samples=5,
+                metric='haversine',
+                cluster_selection_method='eom',
+                prediction_data=True
+            )
+            df, clusterer = HdbscanAlgoritham.spatial_clustering(
+                df=df,
+                save_model=True
+            )
+            clustering_metrics=HdbscanAlgoritham.evaluate_clusering(df=df)
+            if clustering_metrics:
+               cluster_quality_fig = HdbscanAlgoritham.visualize_cluster_quality(df, clustering_metrics)
+               cluster_quality_fig.savefig('output/cluster_quality.png', dpi=300, bbox_inches='tight')
+
+               # Add metrics to insights
+               metrics_text = "\nCLUSTERING QUALITY METRICS:\n"
+               metrics_text += f"- Silhouette Score: {clustering_metrics['silhouette']:.3f} (range: -1 to 1, higher better)\n"
+               metrics_text += f"- Calinski-Harabasz Index: {clustering_metrics['calinski_harabasz']:.1f} (higher better)\n"
+               metrics_text += f"- Davies-Bouldin Index: {clustering_metrics['davies_bouldin']:.3f} (lower better)\n"
+               metrics_text += f"- Average Intra-Cluster Density: {clustering_metrics['avg_intra_cluster_density']:.6f} degrees\n"
+               metrics_text += f"- Average Minimum Cluster Distance: {clustering_metrics['avg_min_cluster_distance']:.6f} degrees"
+
+               with open('output/clustering_metrics.txt', 'w') as f:
+                   f.write(metrics_text)
+
+        except Exception as e:
+            raise
