@@ -8,7 +8,7 @@ from folium.plugins import (
     HeatMap,
     MarkerCluster
 )
-import hdbscan
+import hdbscan 
 from sklearn.manifold import TSNE
 import plotly.express as px
 from datetime import datetime
@@ -19,11 +19,7 @@ from sklearn.metrics import (
 )
 import os, sys
 import joblib
-from flask import (
-    Flask,
-    request,
-    jsonify
-)
+
 import streamlit as ui 
 from streamlit_folium import folium_static
 import logging
@@ -32,7 +28,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from base.base_i import (
     LoadCsvDataForPreprocessEstimatorMixin,
     HDBSCANEstimatorMixin,
-    AnalyzeVisualizationBaseEstimatorMixin
+    AnalyzeVisualizationBaseEstimatorMixin,
+    InsightsGeneraterMixin,
+    BasePredictMixin,
+    ApplicationRunMixin
 )
 import warnings 
 warnings.filterwarnings('ignore')
@@ -57,6 +56,16 @@ def save_object(file_path: str, obj: object) -> None:
         logging.info("Exited the save_object method of MainUtils class")
     except Exception as e:
         raise e
+    
+def load_object(file_path: str, ) -> object:
+    try:
+        if not os.path.exists(file_path):
+            raise Exception(f"The file: {file_path} is not exists")
+        with open(file_path, "rb") as file_obj:
+            print(file_obj)
+            return joblib.load(file_obj)
+    except Exception as e:
+        raise e    
     
 
 class LoadDataAndPreprocess(LoadCsvDataForPreprocessEstimatorMixin):
@@ -169,89 +178,77 @@ class LoadDataAndPreprocess(LoadCsvDataForPreprocessEstimatorMixin):
 class HDBSCANCluster(HDBSCANEstimatorMixin):
 
     def __init__(
-            self,
-            min_cluster_size: int=15,
-            min_samples: int=5,
-            metric: str='haversine',
-            cluster_selection_method: str='eom',
-            prediction_data: bool=True
-        ):
+        self,
+        min_cluster_size: int = 15,
+        min_samples: int = 5,
+        metric: str = 'haversine',
+        cluster_selection_method: str = 'eom',
+        prediction_data: bool = True
+    ):
+        self.model = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric=metric,
+            cluster_selection_method=cluster_selection_method,
+            prediction_data=prediction_data
+        )
 
+    def spatial_clustering(self, df: pd.DataFrame, save_model=True) -> tuple[pd.DataFrame, hdbscan.HDBSCAN]:
         try:
-            self.min_cluster_size=min_cluster_size
-            self.min_samples=min_samples
-            self.metric=metric
-            self.cluster_selection_method=cluster_selection_method
-            self.prediction_data=prediction_data
-        except Exception as e:
-            logger.error(f"Error Occured In : {e}")
-            print(f"Error Occured In : {e}")
-            raise 
+            logger.info("Performing spatial clustering...")
 
-    def spatial_clustering(self, df: pd.DataFrame, 
-                           save_model=True) -> tuple[pd.DataFrame, hdbscan.HDBSCAN]:
+            coords = df[['Latitude', 'Longitude']].copy()
+            coords_rad = np.radians(coords)
 
-        try:
-            logger.info("performing spratial clustering .....")
-
-            spatial_data = df[['Latitude', 'Longitude']].copy()
-
-            clusterer = hdbscan.HDBSCAN(
-                min_cluster_size=self.min_cluster_size,
-                min_samples=self.min_samples,
-                metric=self.metric,
-                cluster_selection_method=self.cluster_selection_method,
-                prediction_data=self.prediction_data
-            )
-
-            coords_rad = np.radians(spatial_data)
-            df['SPATIAL_CLUSTER'] = clusterer.fit_predict(coords_rad)
-
+            df['SPATIAL_CLUSTER'] = self.model.fit_predict(coords_rad)
             cluster_counts = df['SPATIAL_CLUSTER'].value_counts()
             df["CLUSTER_SIZE"] = df['SPATIAL_CLUSTER'].map(cluster_counts)
-            print(f"Identified {cluster_counts[cluster_counts.index != -1].shape[0]} spatial clusters")
-            
-            if save_model:
-                save_object("models/hdbscan_clusterer.joblib", clusterer)
-                logger.info("Saved clustering model to hdbscan_clusterer.joblib")
-            return df, clusterer    
-        except Exception as e:
-            logger.error(f"Error Occured In : {e}")
-            print(f"Error Occured In : {e}")
-            raise   
 
-    def evaluate_clusering(self, df: pd.DataFrame):
+            print(f"Identified {cluster_counts[cluster_counts.index != -1].shape[0]} spatial clusters")
+
+            if save_model:
+                save_object("models/hdbscan_clusterer.joblib", self.model)
+                logger.info("Saved clustering model to hdbscan_clusterer.joblib")
+            logger.info(f"cluster model : {self.model}")
+            return df, self.model
+
+        except Exception as e:
+            logger.error(f"Error in spatial_clustering: {e}")
+            raise
+
+    def evaluate_clustering(self, df: pd.DataFrame) -> dict:
 
         try:
             logger.info("Evaluating clustering quality...")
 
-            # Prepare data - only clustered points (exclude noise)
+
             clustered = df[df['SPATIAL_CLUSTER'] != -1]
             if len(clustered) < 2:
                 print("Not enough clustered points for evaluation")
-                return None
+                return {}
+
             coords = clustered[['Latitude', 'Longitude']].values
             labels = clustered['SPATIAL_CLUSTER'].values
-            # Calculate evaluation metrics
+
             metrics = {}
-            # Silhouette Score (-1 to 1, higher is better)
+
             try:
                 metrics['silhouette'] = silhouette_score(coords, labels, metric='haversine')
             except:
-                metrics['silhouette'] = -1  # Error value
-            # Calinski-Harabasz Index (higher is better)
+                metrics['silhouette'] = -1
+
             try:
                 metrics['calinski_harabasz'] = calinski_harabasz_score(coords, labels)
             except:
                 metrics['calinski_harabasz'] = -1
 
-            # Davies-Bouldin Index (lower is better)
+
             try:
                 metrics['davies_bouldin'] = davies_bouldin_score(coords, labels)
             except:
                 metrics['davies_bouldin'] = float('inf')
 
-            # Cluster separation index (custom metric)
+            # Average minimum inter-cluster distance
             cluster_centers = clustered.groupby('SPATIAL_CLUSTER')[['Latitude', 'Longitude']].mean()
             min_distances = []
             for center in cluster_centers.values:
@@ -268,62 +265,55 @@ class HDBSCANCluster(HDBSCANEstimatorMixin):
                 intra_density.append(np.mean(distances))
             metrics['avg_intra_cluster_density'] = np.mean(intra_density)
 
-            logger.info("Clustering evaluation complete")
-            return metrics
-        except Exception as e:
-            logger.error(f"Error Occured In : {e}")
-            print(f"Error Occured In : {e}")
-            raise  
 
-    def visualize_cluster_quality(self, df, metrics):
+            return metrics
+
+        except Exception as e:
+            logger.error(f"Error in evaluate_clustering: {e}")
+            raise
+
+    def visualize_cluster_quality(self, df: pd.DataFrame, metrics: dict) -> plt.Figure:
 
         try:
-            print("Visualizing cluster quality...")
 
-            # Prepare data
+
+
             clustered = df[df['SPATIAL_CLUSTER'] != -1]
+
+
+            fig, ax = plt.subplots(2, 2, figsize=(18, 16))
 
             # 1. Cluster size distribution
             cluster_sizes = clustered['SPATIAL_CLUSTER'].value_counts()
-
-            # 2. T-SNE visualization
-            tsne = TSNE(
-                n_components=2, 
-                random_state=42, 
-                perplexity=min(30, len(clustered)-1)
-            )
-            tsne_results = tsne.fit_transform(clustered[['Latitude', 'Longitude']])
-
-            # Create figure
-            fig, ax = plt.subplots(2, 2, figsize=(18, 16))
-
-            # Cluster size distribution
             sns.barplot(x=cluster_sizes.values, y=cluster_sizes.index.astype(str),
                         ax=ax[0, 0], palette='viridis')
             ax[0, 0].set_title('Cluster Size Distribution', fontsize=16)
             ax[0, 0].set_xlabel('Number of Points', fontsize=14)
             ax[0, 0].set_ylabel('Cluster ID', fontsize=14)
 
-            # T-SNE visualization
-            scatter = ax[0, 1].scatter(
-                tsne_results[:, 0], tsne_results[:, 1],
-                c=clustered['SPATIAL_CLUSTER'], cmap='tab20', alpha=0.6
-            )
+            # 2. t-SNE
+            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(clustered) - 1))
+            coords = clustered[['Latitude', 'Longitude']].values
+            tsne_results = tsne.fit_transform(coords)
+
+            scatter = ax[0, 1].scatter(tsne_results[:, 0], tsne_results[:, 1],
+                                       c=clustered['SPATIAL_CLUSTER'], cmap='tab20', alpha=0.6)
             ax[0, 1].set_title('t-SNE Cluster Visualization', fontsize=16)
             ax[0, 1].set_xlabel('t-SNE 1', fontsize=14)
             ax[0, 1].set_ylabel('t-SNE 2', fontsize=14)
             plt.colorbar(scatter, ax=ax[0, 1], label='Cluster ID')
 
-            # Metric visualization
+
+            # 3. Radar chart for metrics
             metric_names = ['silhouette', 'calinski_harabasz', 'davies_bouldin']
             metric_values = [metrics.get(m, 0) for m in metric_names]
             metric_labels = ['Silhouette (↑)', 'Calinski-Harabasz (↑)', 'Davies-Bouldin (↓)']
 
-            # Create radar chart for metrics
+
             angles = np.linspace(0, 2 * np.pi, len(metric_names), endpoint=False)
-            values = np.array(metric_values)
-            values = np.concatenate((values, [values[0]]))
+            values = np.concatenate((metric_values, [metric_values[0]]))
             angles = np.concatenate((angles, [angles[0]]))
+
 
             ax[1, 0] = plt.subplot(2, 2, 3, polar=True)
             ax[1, 0].plot(angles, values, 'o-', linewidth=2)
@@ -332,7 +322,7 @@ class HDBSCANCluster(HDBSCANEstimatorMixin):
             ax[1, 0].set_xticklabels(metric_labels)
             ax[1, 0].set_title('Cluster Quality Metrics', fontsize=16, pad=20)
 
-            # Boxplot of intra-cluster distances
+            # 4. Boxplot of intra-cluster distances
             intra_distances = []
             for cluster_id in clustered['SPATIAL_CLUSTER'].unique():
                 cluster_points = clustered[clustered['SPATIAL_CLUSTER'] == cluster_id][['Latitude', 'Longitude']].values
@@ -347,9 +337,10 @@ class HDBSCANCluster(HDBSCANEstimatorMixin):
 
             plt.tight_layout()
             return fig
+
         except Exception as e:
-            logger.info(f"Error Occured In : {e}")
-            raise    
+            logger.error(f"Error in visualize_cluster_quality: {e}")
+            raise  
 
 
 class AnalyzeVisualization(AnalyzeVisualizationBaseEstimatorMixin):
@@ -734,72 +725,186 @@ class AnalyzeVisualization(AnalyzeVisualizationBaseEstimatorMixin):
             logger.error(f"Error Occured In : {e}")   
             raise 
        
-            
+class InsightsGenerater(InsightsGeneraterMixin):
 
-    
+    def __init__(self):
+
+        pass
+
+    def generate_insights(
+            self, 
+            df: pd.DataFrame, 
+            analysis_results:  dict[str, pd.DataFrame | dict]
+    ) -> list:
+
+        try:
+            print("Generating insights report...")
+            insights = []
+            results = analysis_results['results']
+            borough_id = analysis_results['borough_id']
+            precinct_id = analysis_results['precinct_id']
+            cluster_id = analysis_results['cluster_id']
+
+            insights.append("NYPD SHOOTING INCIDENT ANALYSIS REPORT")
+            insights.append("=" * 50)
+            insights.append(f"Total Incidents Analyzed: {len(df)}")
+            insights.append(f"Geographical Clusters Identified: {cluster_id[cluster_id['incident_count'] > 15].shape[0]}")
+            insights.append("")
+
+            # Identification insights
+            insights.append("PERPETRATOR IDENTIFICATION INSIGHTS:")
+            insights.append(f"- Overall identification rate: {results['full_id_rate']:.1%}")
+            insights.append(f"- Gender identification rate: {results['gender_id_rate']:.1%}")
+            insights.append(f"- Age identification rate: {results['age_id_rate']:.1%}")
+
+            # Borough insights
+            borough_insights = ["- Borough identification rates:"]
+            for _, row in borough_id.iterrows():
+                borough_insights.append(f"  - {row['BORO']}: {row['full_id_rate']:.1%} ({row['incident_count']} incidents)")
+            insights.append("\n".join(borough_insights))
+
+            # Precinct insights
+            worst_precinct = precinct_id.iloc[0]
+            best_precinct = precinct_id.iloc[-1]
+            insights.append(f"- Precinct with lowest identification: #{worst_precinct['PRECINCT']} ({worst_precinct['full_id_rate']:.1%})")
+            insights.append(f"- Precinct with highest identification: #{best_precinct['PRECINCT']} ({best_precinct['full_id_rate']:.1%})")
+
+            # Cluster insights
+            cluster_insights = ["- High-risk clusters with low identification rates:"]
+            low_id_clusters = cluster_id[(cluster_id['id_rate'] < 0.4) & (cluster_id['incident_count'] > 20)]
+            if not low_id_clusters.empty:
+                for _, row in low_id_clusters.iterrows():
+                    cluster_insights.append(f"  - Cluster {row['SPATIAL_CLUSTER']}: {row['id_rate']:.1%} ID rate ({row['incident_count']} incidents)")
+            else:
+                cluster_insights.append("  - No clusters meet high-risk criteria")
+            insights.append("\n".join(cluster_insights))
+
+            # Temporal insights
+            peak_hour = df.groupby('OCCUR_HOUR').size().idxmax()
+            id_at_peak = analysis_results['time_id'].loc[analysis_results['time_id']['OCCUR_HOUR'] == peak_hour, 'PERP_IDENTIFIED'].values[0]
+            insights.append(f"- Peak incident hour: {peak_hour}:00 (ID rate: {id_at_peak:.1%})")
+
+            # Location insights
+            top_location = df['LOCATION_DESC'].value_counts().index[0]
+            top_location_id = analysis_results['location_id'][analysis_results['location_id']['LOCATION_DESC'] == top_location]['id_rate'].values[0]
+            insights.append(f"- Most common location: {top_location} (ID rate: {top_location_id:.1%})")
+
+            # Recommendations
+            insights.append("\nACTIONABLE RECOMMENDATIONS:")
+            insights.append("1. Increase investigative resources in Bronx precincts with low identification rates")
+            insights.append("2. Enhance witness protection programs in high-risk clusters with ID rates below 40%")
+            insights.append("3. Deploy mobile surveillance units to locations with high incidents and low identification")
+            insights.append("4. Implement community engagement programs in precincts with persistent low identification")
+            insights.append("5. Focus forensic resources on peak incident hours (evening/night)")
+
+            # Save insights
+            with open('output/analysis_insights.txt', 'w') as f:
+                f.write("\n".join(insights))
+
+            return insights
+        except Exception as e:
+            logger.error(f"Error Occured In : {e}")
+            raise        
+
+class PredictPipeline(BasePredictMixin):
+
+    def __init__(self):
+        self.clusterer = None
+
+    def predict_cluster(self, latitude: float, longitude: float, clusterer=None) -> tuple[int, float]:
+        print(f"[DEBUG] Latitude: {latitude}, Type: {type(latitude)}")
+        print(f"[DEBUG] Longitude: {longitude}, Type: {type(longitude)}")
+
+        if not isinstance(latitude, (float, int)) or not isinstance(longitude, (float, int)):
+            raise TypeError("Latitude and Longitude must be float or int")
+
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Invalid latitude or longitude range")
+
+        try:
+            if clusterer is None:
+                if self.clusterer is None:
+                    model_path = os.path.join("models", "hdbscan_clusterer.joblib")
+                    self.clusterer = load_object(model_path)
+                clusterer = self.clusterer
+
+            point_rad = np.radians([[latitude, longitude]])
+            print(f"[DEBUG] point_rad: {point_rad}")
+
+            cluster, prob = hdbscan.approximate_predict(clusterer, point_rad)
+            prob = prob[0]
+
+            return int(cluster[0]), 0.0 if np.isnan(prob) else prob
+
+        except Exception as e:
+            logger.exception(f"Prediction failed: {e}")
+            raise e
+
+
+
 class Pipeline:
     def __init__(self):
-        pass
+        self.clusterer = None  # Optional: store model instance
 
     def main(self):
 
         try:
             os.makedirs('output', exist_ok=True)
+
             file_path = r'C:\Users\Vishnu\Desktop\NYPD_SHOOTING_CLUSTERING\NYPD-Shooting-Incident-clustering\data\NYPD_Shooting_Incident_Data__Historic_.csv'
             if not os.path.exists(file_path):
-                print(f"Error: Data file not found at {file_path}")
+                print(f"❌ Error: Data file not found at {file_path}")
                 return
-            df=LoadDataAndPreprocess(
-                file_path=file_path
-            ).load_and_preprocess()
-            #df.to_csv("cleaned_and_cluster_label.csv", index=False)
-            HdbscanAlgoritham=HDBSCANCluster(
+
+            # Step 1: Load and clean data
+            df = LoadDataAndPreprocess(file_path=file_path).load_and_preprocess()
+
+            # Step 2: Initialize and run HDBSCAN
+            self.clusterer = HDBSCANCluster(
                 min_cluster_size=15,
                 min_samples=5,
                 metric='haversine',
                 cluster_selection_method='eom',
                 prediction_data=True
             )
-            df, clusterer = HdbscanAlgoritham.spatial_clustering(
-                df=df,
-                save_model=True
-            )
-            clustering_metrics=HdbscanAlgoritham.evaluate_clusering(df=df)
+
+            df, model = self.clusterer.spatial_clustering(df=df, save_model=True)
+
+            # Step 3: Evaluate cluster quality
+            clustering_metrics = self.clusterer.evaluate_clustering(df)
             if clustering_metrics:
-               cluster_quality_fig = HdbscanAlgoritham.visualize_cluster_quality(df, clustering_metrics)
-               cluster_quality_fig.savefig('output/cluster_quality.png', dpi=300, bbox_inches='tight')
+                fig = self.clusterer.visualize_cluster_quality(df, clustering_metrics)
+                fig.savefig('output/cluster_quality.png', dpi=300, bbox_inches='tight')
 
-               # Add metrics to insights
-               metrics_text = "\nCLUSTERING QUALITY METRICS:\n"
-               metrics_text += f"- Silhouette Score: {clustering_metrics['silhouette']:.3f} (range: -1 to 1, higher better)\n"
-               metrics_text += f"- Calinski-Harabasz Index: {clustering_metrics['calinski_harabasz']:.1f} (higher better)\n"
-               metrics_text += f"- Davies-Bouldin Index: {clustering_metrics['davies_bouldin']:.3f} (lower better)\n"
-               metrics_text += f"- Average Intra-Cluster Density: {clustering_metrics['avg_intra_cluster_density']:.6f} degrees\n"
-               metrics_text += f"- Average Minimum Cluster Distance: {clustering_metrics['avg_min_cluster_distance']:.6f} degrees"
+                metrics_text = "\nCLUSTERING QUALITY METRICS:\n"
+                metrics_text += f"- Silhouette Score: {clustering_metrics['silhouette']:.3f} (range: -1 to 1, higher better)\n"
+                metrics_text += f"- Calinski-Harabasz Index: {clustering_metrics['calinski_harabasz']:.1f} (higher better)\n"
+                metrics_text += f"- Davies-Bouldin Index: {clustering_metrics['davies_bouldin']:.3f} (lower better)\n"
+                metrics_text += f"- Average Intra-Cluster Density: {clustering_metrics['avg_intra_cluster_density']:.6f} degrees\n"
+                metrics_text += f"- Average Minimum Cluster Distance: {clustering_metrics['avg_min_cluster_distance']:.6f} degrees\n"
 
-               with open('output/clustering_metrics.txt', 'w') as f:
-                   f.write(metrics_text)
-            
-            AnalyzeVisualizationoperation=AnalyzeVisualization()
-            # Temporal analysis
-            hourly, daily, monthly = AnalyzeVisualizationoperation.analyze_temporal(df)
+                with open('output/clustering_metrics.txt', 'w') as f:
+                    f.write(metrics_text)
 
-            # Identification analysis
-            id_analysis = AnalyzeVisualizationoperation.analyze_identification(df)
+            # Step 4: Run further analysis and insights
+            analysis = AnalyzeVisualization()
 
-            # Visualizations
-            heatmap = AnalyzeVisualizationoperation.create_heatmap(df)
-            cluster_map = AnalyzeVisualizationoperation.create_cluster_map(df)
-            temporal_fig = AnalyzeVisualizationoperation.plot_temporal_patterns(hourly, daily, monthly)
-            demo_fig = AnalyzeVisualizationoperation.demographic_analysis(df)
-            id_fig = AnalyzeVisualizationoperation.plot_identification_analysis(id_analysis)
-            id_map = AnalyzeVisualizationoperation.create_identification_map(id_analysis['cluster_id'])
+            hourly, daily, monthly = analysis.analyze_temporal(df)
+            id_analysis = analysis.analyze_identification(df)
 
-            # Generate insights
-            #insights = generate_insights(df, id_analysis)
+            heatmap = analysis.create_heatmap(df)
+            cluster_map = analysis.create_cluster_map(df)
+            temporal_fig = analysis.plot_temporal_patterns(hourly, daily, monthly)
+            demo_fig = analysis.demographic_analysis(df)
+            id_fig = analysis.plot_identification_analysis(id_analysis)
+            id_map = analysis.create_identification_map(id_analysis['cluster_id'])
 
-            # Save outputs
+            # Step 5: Generate textual insights
+            insights = InsightsGenerater().generate_insights(df, id_analysis)
+
+            # Step 6: Save everything
             logger.info("Saving outputs...")
+
             heatmap.save('output/heatmap.html')
             cluster_map.save('output/cluster_map.html')
             id_map.save('output/identification_map.html')
@@ -807,12 +912,12 @@ class Pipeline:
             demo_fig.savefig('output/demographics.png', dpi=300, bbox_inches='tight')
             id_fig.savefig('output/identification_analysis.png', dpi=300, bbox_inches='tight')
 
-            # Save data
+
             df.to_csv('output/processed_data.csv', index=False)
 
-            logger.info("Analysis complete!")       
+            logger.info("✅ Analysis complete!")
 
         except Exception as e:
+            logger.exception("❌ Pipeline failed")
+        
             raise
-
-
