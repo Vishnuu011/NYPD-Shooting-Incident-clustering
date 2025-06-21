@@ -389,7 +389,7 @@ class AnalyzeVisualization(AnalyzeVisualizationBaseEstimatorMixin):
     def create_cluster_map(self, df: pd.DataFrame) -> folium.map:
 
         try:
-            print("Creating cluster map...")
+            logger.info("Creating cluster map...")
             cluster_map = folium.Map(location=[40.7128, -74.0060], zoom_start=11, tiles='cartodbpositron')
 
             # Add heatmap layer
@@ -448,7 +448,7 @@ class AnalyzeVisualization(AnalyzeVisualizationBaseEstimatorMixin):
                     popup=popup_text
                 ).add_to(cluster_map)
             
-            print("Cluster map created successfully")
+            logger.info("Cluster map created successfully")
             return cluster_map
         except Exception as e:
             logger.info(f"Error Occured In : {e}")
@@ -853,7 +853,7 @@ class Pipeline:
 
             file_path = r'C:\Users\Vishnu\Desktop\NYPD_SHOOTING_CLUSTERING\NYPD-Shooting-Incident-clustering\data\NYPD_Shooting_Incident_Data__Historic_.csv'
             if not os.path.exists(file_path):
-                print(f"❌ Error: Data file not found at {file_path}")
+                print(f"Error: Data file not found at {file_path}")
                 return
 
             # Step 1: Load and clean data
@@ -915,9 +915,9 @@ class Pipeline:
 
             df.to_csv('output/processed_data.csv', index=False)
 
-            logger.info("✅ Analysis complete!")
+            logger.info("Analysis complete!")
 
         except Exception as e:
-            logger.exception("❌ Pipeline failed")
+            logger.exception("Pipeline failed")
         
             raise

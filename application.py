@@ -1,12 +1,15 @@
+import sys
+
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from server.cluster_app import PredictPipeline
 from flask import (
     Flask,
     request,
     jsonify
 )
-import sys
-import sys
-import os
+
 
 def create_app():
     app = Flask(__name__)

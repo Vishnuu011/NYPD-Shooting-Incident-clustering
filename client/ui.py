@@ -3,9 +3,7 @@ import folium
 from streamlit_folium import folium_static
 import requests
 import os
-import json
 
-# Set page config
 st.set_page_config(page_title="NYPD Shooting Analysis", layout="wide")
 
 # API endpoint configuration
@@ -93,3 +91,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
